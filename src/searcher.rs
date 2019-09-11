@@ -38,11 +38,11 @@ impl Searcher {
         &self,
         py: Python,
         query: &Query,
-        size: usize,
+        nhits: usize,
         facets: Option<&PyDict>
     ) -> PyResult<PyObject> {
 
-        let top_collector = tv::collector::TopDocs::with_limit(size);
+        let top_collector = tv::collector::TopDocs::with_limit(nhits);
 
         let mut facets_collector = tv::collector::MultiCollector::new();
 

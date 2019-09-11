@@ -93,7 +93,7 @@ class TestClass(object):
         index = ram_index
         query = index.parse_query("sea whale", ["title", "body"])
 
-        result = index.searcher().search(query, size=10, facets={"facets": ["/category"]})
+        result = index.searcher().search(query, nhits=10, facets={"facets": ["/category"]})
         assert result["count"] == 2
         assert len(result["facets"]["facets"]) == 2
         _, doc_address = result["items"][0]
@@ -101,7 +101,7 @@ class TestClass(object):
         assert searched_doc["title"] == ["The Old Man and the Sea"]
 
         query = index.parse_query("sea whale", ["title", "body"], filters={"facets": ["/category/category1"]})
-        result = index.searcher().search(query, size=10, facets={"facets": ["/category"]})
+        result = index.searcher().search(query, nhits=10, facets={"facets": ["/category"]})
         assert result["count"] == 1
         assert len(result["facets"]["facets"]) == 1
         _, doc_address = result["items"][0]
@@ -109,7 +109,7 @@ class TestClass(object):
         assert searched_doc["title"] == ["The Old Man and the Sea"]
 
         query = index.parse_query("sea whale", ["title", "body"], filters={"facets": ["/category"]})
-        result = index.searcher().search(query, size=10, facets={"facets": ["/category"]})
+        result = index.searcher().search(query, nhits=10, facets={"facets": ["/category"]})
         assert result["count"] == 2
         assert len(result["facets"]["facets"]) == 2
         _, doc_address = result["items"][0]
