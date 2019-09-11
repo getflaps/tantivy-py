@@ -2,7 +2,7 @@
 
 use pyo3::exceptions;
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyDict, PyTuple, PyList};
 
 use crate::document::{extract_value, Document};
 use crate::query::Query;
@@ -306,11 +306,11 @@ impl Index {
     ///     default_fields (List[Field]): A list of fields used to search if no
     ///         field is specified in the query.
     ///
-    #[args(reload_policy = "RELOAD_POLICY")]
     pub fn parse_query(
         &self,
         query: &str,
         default_field_names: Option<Vec<String>>,
+        filters: Option<&PyDict>
     ) -> PyResult<Query> {
         let mut default_fields = vec![];
         let schema = self.index.schema();
@@ -341,9 +341,46 @@ impl Index {
                 }
             }
         }
+
+
         let parser =
             tv::query::QueryParser::for_index(&self.index, default_fields);
         let query = parser.parse_query(query).map_err(to_pyerr)?;
-        Ok(Query { inner: query })
+
+        if let Some(filters_dict) = filters {
+            let mut query_vec = Vec::new();
+            query_vec.push((tv::query::Occur::Must, query));
+            for key_value_any in filters_dict.items() {
+                if let Ok(key_value) = key_value_any.downcast_ref::<PyTuple>() {
+                    if key_value.len() != 2 {
+                        continue;
+                    }
+                    let key: String = key_value.get_item(0).extract()?;
+                    let field = schema.get_field(&key).ok_or_else(|| {
+                        exceptions::ValueError::py_err(format!(
+                            "Field `{}` is not defined in the schema.",
+                            key
+                        ))
+                    })?;
+
+                    if let Ok(value_list) = key_value.get_item(1).downcast_ref::<PyList>() {
+                        for value_element in value_list {
+                            if let Ok(s) = value_element.extract::<String>() {
+                                let facet = tv::schema::Facet::from_text(&s);
+                                let term = tv::schema::Term::from_facet(field, &facet);
+                                let term_query = tv::query::TermQuery::new(term, tv::schema::IndexRecordOption::Basic);
+                                let query: Box<dyn tv::query::Query> = Box::new(term_query);
+                                query_vec.push((tv::query::Occur::Must, query));
+                            }    
+                        }
+                    }
+                }
+            }
+            let boolean_query = tv::query::BooleanQuery::from(query_vec);
+            return Ok(Query { inner: Box::new(boolean_query) })
+        }
+
+        return Ok(Query { inner: query})
+
     }
 }

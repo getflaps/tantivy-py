@@ -33,25 +33,25 @@ impl Searcher {
     /// search results.
     ///
     /// Raises a ValueError if there was an error with the search.
-    #[args(size = 10, filter = "**")]
+    #[args(size = 10)]
     fn search(
         &self,
         py: Python,
         query: &Query,
         size: usize,
-        filter: Option<&PyDict>
+        facets: Option<&PyDict>
     ) -> PyResult<PyObject> {
 
         let top_collector = tv::collector::TopDocs::with_limit(size);
 
-        let mut filter_collector = tv::collector::MultiCollector::new();
-        // let mut facets_requests: BTreeMap<String, tv::collector::multi_collector::FruitHandle> =
-        //     BTreeMap::new();
+        let mut facets_collector = tv::collector::MultiCollector::new();
+
         let mut facets_requests = BTreeMap::new();
 
-        if let Some(filter_dict) = filter {
+        // We create facets collector for each field and terms defined on the facets args
+        if let Some(facets_dict) = facets {
 
-            for key_value_any in filter_dict.items() {
+            for key_value_any in facets_dict.items() {
                 if let Ok(key_value) = key_value_any.downcast_ref::<PyTuple>() {
                     if key_value.len() != 2 {
                         continue;
@@ -70,31 +70,24 @@ impl Searcher {
                         for value_element in value_list {
                             if let Ok(s) = value_element.extract::<String>() {
                                 facet_collector.add_facet(&s);
-                                println!("ADDED {} on field {} found.", s, key);
                             }
                             
                         }
-                        let facet_handler = filter_collector.add_collector(facet_collector);
+                        let facet_handler = facets_collector.add_collector(facet_collector);
                         facets_requests.insert(key, facet_handler);
                     }
                 }
             }
         }
 
-        println!("FACETS {} found.", facets_requests.len());
-        let ret = self.inner.search(&query.inner, &(tv::collector::Count, top_collector, filter_collector));
+        let ret = self.inner.search(&query.inner, &(tv::collector::Count, top_collector, facets_collector));
 
         match ret {
-            Ok((count, top, mut facets)) => {
+            Ok((count, top, mut facets_tv_results)) => {
                 let result = PyDict::new(py);
 
                 result.set_item("count", count)?;
 
-                // let result: SearchResults = SearchResults::default();
-
-                // for (f, d) in &top {
-                //     result.add_item(*f, DocAddress::from(d).clone())
-                // }
                 let items: Vec<(f32, (u32, u32))> =
                     top.iter().map(|(f, d)| (*f, (d.segment_ord(), d.doc()))).collect();
 
@@ -105,21 +98,21 @@ impl Searcher {
 
                 // Go though all collectors that are registered
                 for (key, facet_collector) in facets_requests {
-                    let facet_count = facet_collector.extract(&mut facets);
-                    let mut vec = Vec::new();
-                    if let Some(filter_dict) = filter {
-                        match filter_dict.get_item(key.clone()) {
-                            Some(filter_list_by_key) => {
-                                if let Ok(filter_list_by_key_native) = filter_list_by_key.downcast_ref::<PyList>() {
-                                    for filter_value in filter_list_by_key_native {
-                                        if let Ok(s) = filter_value.extract::<String>() {
+                    let facet_count = facet_collector.extract(&mut facets_tv_results);
+                    let mut facet_vec = Vec::new();
+                    if let Some(facets_dict) = facets {
+                        match facets_dict.get_item(key.clone()) {
+                            Some(facets_list_by_key) => {
+                                if let Ok(facets_list_by_key_native) = facets_list_by_key.downcast_ref::<PyList>() {
+                                    for facet_value in facets_list_by_key_native {
+                                        if let Ok(s) = facet_value.extract::<String>() {
                                             let facet_value_vec: Vec<(&tv::schema::Facet, u64)> = facet_count
                                                 .get(&s)
                                                 .collect();
 
                                             // Go for all elements on facet and count to add on vector
                                             for (facet_value_vec_element, facet_count) in facet_value_vec {
-                                                vec.push((facet_value_vec_element.to_string(), facet_count))
+                                                facet_vec.push((facet_value_vec_element.to_string(), facet_count))
                                             }
                                         }
                                     }
@@ -128,7 +121,7 @@ impl Searcher {
                             None => println!("Not found.")
                         }
                     }
-                    facets_result.insert(key.clone(), vec);
+                    facets_result.insert(key.clone(), facet_vec);
                 }
 
                 result.set_item("facets", facets_result)?;
