@@ -68,29 +68,26 @@ class TestClass(object):
         index = ram_index
         query = index.parse_query("sea whale", ["title", "body"])
 
-        top_docs = tantivy.TopDocs(10)
-
-        result = index.searcher().search(query, top_docs)
-        assert len(result) == 1
-        _, doc_address = result[0]
-        searched_doc = index.searcher().doc(doc_address)
+        result = index.searcher().search(query, size=10)
+        assert result["count"] == 1
+        _, doc_address = result["items"][0]
+        searched_doc = index.searcher().docn(doc_address)
         assert searched_doc["title"] == ["The Old Man and the Sea"]
 
     def test_and_query(self, ram_index):
         index = ram_index
         query = index.parse_query("title:men AND body:summer", default_field_names=["title", "body"])
         # look for an intersection of documents
-        top_docs = tantivy.TopDocs(10)
         searcher = index.searcher()
-        result = searcher.search(query, top_docs)
+        result = searcher.search(query, size=10)
 
         # summer isn't present
-        assert len(result) == 0
+        assert result["count"] == 0
 
         query = index.parse_query("title:men AND body:winter", ["title", "body"])
-        result = searcher.search(query, top_docs)
+        result = searcher.search(query, size=10)
 
-        assert len(result) == 1
+        assert result["count"] == 1
 
     def test_and_query_parser_default_fields(self, ram_index):
         query = ram_index.parse_query("winter", default_field_names=["title"])
@@ -115,9 +112,8 @@ class TestClass(object):
 class TestUpdateClass(object):
     def test_delete_update(self, ram_index):
         query = ram_index.parse_query("Frankenstein", ["title"])
-        top_docs = tantivy.TopDocs(10)
-        result = ram_index.searcher().search(query, top_docs)
-        assert len(result) == 1
+        result = ram_index.searcher().search(query, size=10)
+        result["count"] == 1
 
         writer = ram_index.writer()
 
@@ -131,8 +127,8 @@ class TestUpdateClass(object):
         writer.commit()
         ram_index.reload()
 
-        result = ram_index.searcher().search(query, top_docs)
-        assert len(result) == 0
+        result = ram_index.searcher().search(query, size=10)
+        result["count"] == 0
 
 
 PATH_TO_INDEX = "tests/test_index/"

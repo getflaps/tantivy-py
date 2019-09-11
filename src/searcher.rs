@@ -5,7 +5,10 @@ use crate::query::Query;
 use crate::to_pyerr;
 use pyo3::prelude::*;
 use pyo3::{exceptions, PyObjectProtocol};
+use pyo3::types::{PyDict, PyTuple, PyList};
 use tantivy as tv;
+use std::collections::BTreeMap;
+
 
 /// Tantivy's Searcher class
 ///
@@ -13,6 +16,7 @@ use tantivy as tv;
 #[pyclass]
 pub(crate) struct Searcher {
     pub(crate) inner: tv::LeasedItem<tv::Searcher>,
+    pub(crate) schema: tv::schema::Schema,
 }
 
 #[pymethods]
@@ -29,20 +33,112 @@ impl Searcher {
     /// search results.
     ///
     /// Raises a ValueError if there was an error with the search.
+    #[args(size = 10, filter = "**")]
     fn search(
         &self,
+        py: Python,
         query: &Query,
-        collector: &mut TopDocs,
-    ) -> PyResult<Vec<(f32, DocAddress)>> {
-        let ret = self.inner.search(&query.inner, &collector.inner);
-        match ret {
-            Ok(r) => {
-                let result: Vec<(f32, DocAddress)> =
-                    r.iter().map(|(f, d)| (*f, DocAddress::from(d))).collect();
-                Ok(result)
+        size: usize,
+        filter: Option<&PyDict>
+    ) -> PyResult<PyObject> {
+
+        let top_collector = tv::collector::TopDocs::with_limit(size);
+
+        let mut filter_collector = tv::collector::MultiCollector::new();
+        // let mut facets_requests: BTreeMap<String, tv::collector::multi_collector::FruitHandle> =
+        //     BTreeMap::new();
+        let mut facets_requests = BTreeMap::new();
+
+        if let Some(filter_dict) = filter {
+
+            for key_value_any in filter_dict.items() {
+                if let Ok(key_value) = key_value_any.downcast_ref::<PyTuple>() {
+                    if key_value.len() != 2 {
+                        continue;
+                    }
+                    let key: String = key_value.get_item(0).extract()?;
+                    let field = self.schema.get_field(&key).ok_or_else(|| {
+                        exceptions::ValueError::py_err(format!(
+                            "Field `{}` is not defined in the schema.",
+                            key
+                        ))
+                    })?;
+
+                    let mut facet_collector = tv::collector::FacetCollector::for_field(field);
+
+                    if let Ok(value_list) = key_value.get_item(1).downcast_ref::<PyList>() {
+                        for value_element in value_list {
+                            if let Ok(s) = value_element.extract::<String>() {
+                                facet_collector.add_facet(&s);
+                                println!("ADDED {} on field {} found.", s, key);
+                            }
+                            
+                        }
+                        let facet_handler = filter_collector.add_collector(facet_collector);
+                        facets_requests.insert(key, facet_handler);
+                    }
+                }
             }
+        }
+
+        println!("FACETS {} found.", facets_requests.len());
+        let ret = self.inner.search(&query.inner, &(tv::collector::Count, top_collector, filter_collector));
+
+        match ret {
+            Ok((count, top, mut facets)) => {
+                let result = PyDict::new(py);
+
+                result.set_item("count", count)?;
+
+                // let result: SearchResults = SearchResults::default();
+
+                // for (f, d) in &top {
+                //     result.add_item(*f, DocAddress::from(d).clone())
+                // }
+                let items: Vec<(f32, (u32, u32))> =
+                    top.iter().map(|(f, d)| (*f, (d.segment_ord(), d.doc()))).collect();
+
+                result.set_item("items", items)?;
+
+                let mut facets_result: BTreeMap<String, Vec<(String, u64)>> =
+                    BTreeMap::new();
+
+                // Go though all collectors that are registered
+                for (key, facet_collector) in facets_requests {
+                    let facet_count = facet_collector.extract(&mut facets);
+                    let mut vec = Vec::new();
+                    if let Some(filter_dict) = filter {
+                        match filter_dict.get_item(key.clone()) {
+                            Some(filter_list_by_key) => {
+                                if let Ok(filter_list_by_key_native) = filter_list_by_key.downcast_ref::<PyList>() {
+                                    for filter_value in filter_list_by_key_native {
+                                        if let Ok(s) = filter_value.extract::<String>() {
+                                            let facet_value_vec: Vec<(&tv::schema::Facet, u64)> = facet_count
+                                                .get(&s)
+                                                .collect();
+
+                                            // Go for all elements on facet and count to add on vector
+                                            for (facet_value_vec_element, facet_count) in facet_value_vec {
+                                                vec.push((facet_value_vec_element.to_string(), facet_count))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            None => println!("Not found.")
+                        }
+                    }
+                    facets_result.insert(key.clone(), vec);
+                }
+
+                result.set_item("facets", facets_result)?;
+
+                Ok(result.into())
+
+            },
             Err(e) => Err(exceptions::ValueError::py_err(e.to_string())),
         }
+
     }
 
     /// Returns the overall number of documents in the index.
@@ -65,7 +161,20 @@ impl Searcher {
             field_values: named_doc.0,
         })
     }
+
+    fn docn(&self, seg_doc: &PyTuple) -> PyResult<Document> {
+        let seg : u32 = seg_doc.get_item(0).extract()?;
+        let doc : u32 = seg_doc.get_item(1).extract()?;
+        let address = tv::DocAddress(seg, doc);
+        let doc = self.inner.doc(address).map_err(to_pyerr)?;
+        let named_doc = self.inner.schema().to_named_doc(&doc);
+        Ok(Document {
+            field_values: named_doc.0,
+        })
+    }
+
 }
+
 
 /// DocAddress contains all the necessary information to identify a document
 /// given a Searcher object.
@@ -107,28 +216,6 @@ impl From<&tv::DocAddress> for DocAddress {
 impl Into<tv::DocAddress> for &DocAddress {
     fn into(self) -> tv::DocAddress {
         tv::DocAddress(self.segment_ord(), self.doc())
-    }
-}
-
-/// The Top Score Collector keeps track of the K documents sorted by their
-/// score.
-///
-/// Args:
-///     limit (int, optional): The number of documents that the top scorer will
-///         retrieve. Must be a positive integer larger than 0. Defaults to 10.
-#[pyclass]
-pub(crate) struct TopDocs {
-    inner: tv::collector::TopDocs,
-}
-
-#[pymethods]
-impl TopDocs {
-    #[new]
-    #[args(limit = 10)]
-    fn new(obj: &PyRawObject, limit: usize) -> PyResult<()> {
-        let top = tv::collector::TopDocs::with_limit(limit);
-        obj.init(TopDocs { inner: top });
-        Ok(())
     }
 }
 

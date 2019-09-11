@@ -266,6 +266,7 @@ impl Index {
     fn searcher(&self) -> Searcher {
         Searcher {
             inner: self.reader.searcher(),
+            schema: self.index.schema(),
         }
     }
 
