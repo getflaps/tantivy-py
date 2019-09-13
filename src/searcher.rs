@@ -33,7 +33,7 @@ impl Searcher {
     /// search results.
     ///
     /// Raises a ValueError if there was an error with the search.
-    #[args(size = 10)]
+    #[args(nhits = 10)]
     fn search(
         &self,
         py: Python,
@@ -92,6 +92,97 @@ impl Searcher {
                     top.iter().map(|(f, d)| (*f, (d.segment_ord(), d.doc()))).collect();
 
                 result.set_item("items", items)?;
+
+                let mut facets_result: BTreeMap<String, Vec<(String, u64)>> =
+                    BTreeMap::new();
+
+                // Go though all collectors that are registered
+                for (key, facet_collector) in facets_requests {
+                    let facet_count = facet_collector.extract(&mut facets_tv_results);
+                    let mut facet_vec = Vec::new();
+                    if let Some(facets_dict) = facets {
+                        match facets_dict.get_item(key.clone()) {
+                            Some(facets_list_by_key) => {
+                                if let Ok(facets_list_by_key_native) = facets_list_by_key.downcast_ref::<PyList>() {
+                                    for facet_value in facets_list_by_key_native {
+                                        if let Ok(s) = facet_value.extract::<String>() {
+                                            let facet_value_vec: Vec<(&tv::schema::Facet, u64)> = facet_count
+                                                .get(&s)
+                                                .collect();
+
+                                            // Go for all elements on facet and count to add on vector
+                                            for (facet_value_vec_element, facet_count) in facet_value_vec {
+                                                facet_vec.push((facet_value_vec_element.to_string(), facet_count))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            None => println!("Not found.")
+                        }
+                    }
+                    facets_result.insert(key.clone(), facet_vec);
+                }
+
+                result.set_item("facets", facets_result)?;
+
+                Ok(result.into())
+
+            },
+            Err(e) => Err(exceptions::ValueError::py_err(e.to_string())),
+        }
+
+    }
+
+    fn tags(
+        &self,
+        py: Python,
+        facets: Option<&PyDict>
+    ) -> PyResult<PyObject> {
+
+        let mut facets_collector = tv::collector::MultiCollector::new();
+
+        let mut facets_requests = BTreeMap::new();
+
+        // We create facets collector for each field and terms defined on the facets args
+        if let Some(facets_dict) = facets {
+
+            for key_value_any in facets_dict.items() {
+                if let Ok(key_value) = key_value_any.downcast_ref::<PyTuple>() {
+                    if key_value.len() != 2 {
+                        continue;
+                    }
+                    let key: String = key_value.get_item(0).extract()?;
+                    let field = self.schema.get_field(&key).ok_or_else(|| {
+                        exceptions::ValueError::py_err(format!(
+                            "Field `{}` is not defined in the schema.",
+                            key
+                        ))
+                    })?;
+
+                    let mut facet_collector = tv::collector::FacetCollector::for_field(field);
+
+                    if let Ok(value_list) = key_value.get_item(1).downcast_ref::<PyList>() {
+                        for value_element in value_list {
+                            if let Ok(s) = value_element.extract::<String>() {
+                                facet_collector.add_facet(&s);
+                            }
+                            
+                        }
+                        let facet_handler = facets_collector.add_collector(facet_collector);
+                        facets_requests.insert(key, facet_handler);
+                    }
+                }
+            }
+        }
+
+        let ret = self.inner.search(&tv::query::AllQuery, &(tv::collector::Count, facets_collector));
+
+        match ret {
+            Ok((count, mut facets_tv_results)) => {
+                let result = PyDict::new(py);
+
+                result.set_item("count", count)?;
 
                 let mut facets_result: BTreeMap<String, Vec<(String, u64)>> =
                     BTreeMap::new();
